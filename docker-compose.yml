@@ -1,0 +1,57 @@
+version: '3'
+services:
+  # Service Laravel
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: 1telavis-api
+    environment:
+      - APP_ENV=local
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html
+    ports:
+      - "8010:80"
+    networks:
+      - 1telavis-net
+    restart: unless-stopped
+    depends_on:
+      - mysql
+
+  # Service MySQL
+  mysql:
+    image: mysql:5.7
+    container_name: 1telavis-mysql
+    environment:
+      MYSQL_DATABASE: 1telavis
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_USER: 1telavis
+      MYSQL_PASSWORD: 1telavis
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - 1telavis-net
+    restart: unless-stopped
+
+  # Service PhpMyAdmin
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: 1telavis-phpmyadmin
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+    ports:
+      - "8011:80"
+    networks:
+      - 1telavis-net
+    depends_on:
+      - mysql
+    restart: unless-stopped
+
+networks:
+  1telavis-net:
+    driver: bridge
+
+volumes:
+  mysql-data:
