@@ -7,14 +7,15 @@
 namespace OpenApi\Attributes;
 
 use OpenApi\Generator;
+use OpenApi\Annotations as OA;
 
-#[\Attribute(\Attribute::TARGET_CLASS)]
-class Server extends \OpenApi\Annotations\Server
+#[\Attribute(\Attribute::TARGET_CLASS | \Attribute::IS_REPEATABLE)]
+class Server extends OA\Server
 {
     /**
-     * @param ServerVariable[]          $variables
-     * @param array<string,string>|null $x
-     * @param Attachable[]|null         $attachables
+     * @param ServerVariable[]         $variables
+     * @param array<string,mixed>|null $x
+     * @param Attachable[]|null        $attachables
      */
     public function __construct(
         ?string $url = null,

@@ -7,13 +7,14 @@
 namespace OpenApi\Attributes;
 
 use OpenApi\Generator;
+use OpenApi\Annotations as OA;
 
 #[\Attribute(\Attribute::TARGET_CLASS)]
-class Flow extends \OpenApi\Annotations\Flow
+class Flow extends OA\Flow
 {
     /**
-     * @param array<string,string>|null $x
-     * @param Attachable[]|null         $attachables
+     * @param array<string,mixed>|null $x
+     * @param Attachable[]|null        $attachables
      */
     public function __construct(
         ?string $authorizationUrl = null,

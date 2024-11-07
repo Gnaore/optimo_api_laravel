@@ -7,13 +7,14 @@
 namespace OpenApi\Attributes;
 
 use OpenApi\Generator;
+use OpenApi\Annotations as OA;
 
 #[\Attribute(\Attribute::TARGET_CLASS)]
-class Xml extends \OpenApi\Annotations\Xml
+class Xml extends OA\Xml
 {
     /**
-     * @param array<string,string>|null $x
-     * @param Attachable[]|null         $attachables
+     * @param array<string,mixed>|null $x
+     * @param Attachable[]|null        $attachables
      */
     public function __construct(
         ?string $name = null,

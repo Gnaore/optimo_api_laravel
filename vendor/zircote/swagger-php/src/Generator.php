@@ -11,8 +11,9 @@ use OpenApi\Analysers\AnalyserInterface;
 use OpenApi\Analysers\AttributeAnnotationFactory;
 use OpenApi\Analysers\DocBlockAnnotationFactory;
 use OpenApi\Analysers\ReflectionAnalyser;
-use OpenApi\Annotations\OpenApi;
+use OpenApi\Annotations as OA;
 use OpenApi\Loggers\DefaultLogger;
+use OpenApi\Processors\ProcessorInterface;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -20,7 +21,7 @@ use Psr\Log\LoggerInterface;
  *
  * Scans PHP source code and generates OpenApi specifications from the found OpenApi annotations.
  *
- * This is an object oriented alternative to using the now deprecated `\OpenApi\scan()` function and
+ * This is an object-oriented alternative to using the now deprecated `\OpenApi\scan()` function and
  * static class properties of the `Analyzer` and `Analysis` classes.
  */
 class Generator
@@ -35,28 +36,40 @@ class Generator
     /** @var string Magic value to differentiate between null and undefined. */
     public const UNDEFINED = '@OA\Generator::UNDEFINED🙈';
 
-    /** @var string[] */
+    /** @var array<string,string> */
     public const DEFAULT_ALIASES = ['oa' => 'OpenApi\\Annotations'];
-    /** @var string[] */
+    /** @var array<string> */
     public const DEFAULT_NAMESPACES = ['OpenApi\\Annotations\\'];
 
-    /** @var array Map of namespace aliases to be supported by doctrine. */
+    /** @var array<string,string> Map of namespace aliases to be supported by doctrine. */
     protected $aliases;
 
-    /** @var array|null List of annotation namespaces to be autoloaded by doctrine. */
+    /** @var array<string>|null List of annotation namespaces to be autoloaded by doctrine. */
     protected $namespaces;
 
     /** @var AnalyserInterface|null The configured analyzer. */
-    protected $analyser;
+    protected $analyser = null;
 
-    /** @var callable[]|null List of configured processors. */
-    protected $processors = null;
+    /** @var array<string,mixed> */
+    protected $config = [];
+
+    /** @var Pipeline|null */
+    protected $processorPipeline = null;
 
     /** @var LoggerInterface|null PSR logger. */
     protected $logger = null;
 
-    /** @var string */
-    protected $version = OpenApi::DEFAULT_VERSION;
+    /**
+     * OpenApi version override.
+     *
+     * If set, it will override the version set in the `OpenApi` annotation.
+     *
+     * Due to the order of processing any conditional code using this (via `Context::$version`)
+     * must come only after the analysis is finished.
+     *
+     * @var string|null
+     */
+    protected $version = null;
 
     private $configStack;
 
@@ -68,13 +81,15 @@ class Generator
         $this->setNamespaces(self::DEFAULT_NAMESPACES);
 
         // kinda config stack to stay BC...
+        // @deprecated Can be removed once doctrine/annotations 2.0 becomes mandatory
         $this->configStack = new class() {
             protected $generator;
 
             public function push(Generator $generator): void
             {
                 $this->generator = $generator;
-                if (class_exists(AnnotationRegistry::class, true)) {
+                /* @phpstan-ignore-next-line */
+                if (class_exists(AnnotationRegistry::class, true) && method_exists(AnnotationRegistry::class, 'registerLoader')) {
                     // keeping track of &this->generator allows to 'disable' the loader after we are done;
                     // no unload, unfortunately :/
                     $gref = &$this->generator;
@@ -87,7 +102,7 @@ class Generator
                                         if (!$loaded && $namespace === 'OpenApi\\Annotations\\') {
                                             if (in_array(strtolower(substr($class, 20)), ['definition', 'path'])) {
                                                 // Detected an 2.x annotation?
-                                                throw new \Exception('The annotation @SWG\\' . substr($class, 20) . '() is deprecated. Found in ' . Generator::$context . "\nFor more information read the migration guide: https://github.com/zircote/swagger-php/blob/master/docs/Migrating-to-v3.md");
+                                                throw new OpenApiException('The annotation @SWG\\' . substr($class, 20) . '() is deprecated. Found in ' . Generator::$context . "\nFor more information read the migration guide: https://github.com/zircote/swagger-php/blob/master/docs/Migrating-to-v3.md");
                                             }
                                         }
 
@@ -114,6 +129,9 @@ class Generator
         return $value === Generator::UNDEFINED;
     }
 
+    /**
+     * @return array<string>
+     */
     public function getAliases(): array
     {
         return $this->aliases;
@@ -133,6 +151,9 @@ class Generator
         return $this;
     }
 
+    /**
+     * @return array<string>|null
+     */
     public function getNamespaces(): ?array
     {
         return $this->namespaces;
@@ -168,13 +189,76 @@ class Generator
         return $this;
     }
 
-    /**
-     * @return callable[]
-     */
-    public function getProcessors(): array
+    public function getDefaultConfig(): array
     {
-        if (null === $this->processors) {
-            $this->processors = [
+        return [
+            'operationId' => [
+                'hash' => true,
+            ],
+        ];
+    }
+
+    public function getConfig(): array
+    {
+        return $this->config + $this->getDefaultConfig();
+    }
+
+    protected function normaliseConfig(array $config): array
+    {
+        $normalised = [];
+        foreach ($config as $key => $value) {
+            if (is_numeric($key)) {
+                $token = explode('=', $value);
+                if (2 == count($token)) {
+                    // 'operationId.hash=false'
+                    [$key, $value] = $token;
+                }
+            }
+
+            if (in_array($value, ['true', 'false'])) {
+                $value = 'true' == $value;
+            }
+
+            if ($isList = ('[]' == substr($key, -2))) {
+                $key = substr($key, 0, -2);
+            }
+            $token = explode('.', $key);
+            if (2 == count($token)) {
+                // 'operationId.hash' => false
+                // namespaced / processor
+                if ($isList) {
+                    $normalised[$token[0]][$token[1]][] = $value;
+                } else {
+                    $normalised[$token[0]][$token[1]] = $value;
+                }
+            } else {
+                if ($isList) {
+                    $normalised[$key][] = $value;
+                } else {
+                    $normalised[$key] = $value;
+                }
+            }
+        }
+
+        return $normalised;
+    }
+
+    /**
+     * Set generator and/or processor config.
+     *
+     * @param array<string,mixed> $config
+     */
+    public function setConfig(array $config): Generator
+    {
+        $this->config = $this->normaliseConfig($config) + $this->config;
+
+        return $this;
+    }
+
+    public function getProcessorPipeline(): Pipeline
+    {
+        if (null === $this->processorPipeline) {
+            $this->processorPipeline = new Pipeline([
                 new Processors\DocBlockDescriptions(),
                 new Processors\MergeIntoOpenApi(),
                 new Processors\MergeIntoComponents(),
@@ -183,6 +267,7 @@ class Generator
                 new Processors\ExpandTraits(),
                 new Processors\ExpandEnums(),
                 new Processors\AugmentSchemas(),
+                new Processors\AugmentRequestBody(),
                 new Processors\AugmentProperties(),
                 new Processors\BuildPaths(),
                 new Processors\AugmentParameters(),
@@ -191,42 +276,102 @@ class Generator
                 new Processors\MergeXmlContent(),
                 new Processors\OperationId(),
                 new Processors\CleanUnmerged(),
-            ];
+                new Processors\PathFilter(),
+                new Processors\CleanUnusedComponents(),
+                new Processors\AugmentTags(),
+            ]);
         }
 
-        return $this->processors;
+        $config = $this->getConfig();
+        $walker = function (callable $pipe) use ($config) {
+            $rc = new \ReflectionClass($pipe);
+
+            // apply config
+            $processorKey = lcfirst($rc->getShortName());
+            if (array_key_exists($processorKey, $config)) {
+                foreach ($config[$processorKey] as $name => $value) {
+                    $setter = 'set' . ucfirst($name);
+                    if (method_exists($pipe, $setter)) {
+                        $pipe->{$setter}($value);
+                    }
+                }
+            }
+        };
+
+        return $this->processorPipeline->walk($walker);
+    }
+
+    public function setProcessorPipeline(?Pipeline $processor): Generator
+    {
+        $this->processorPipeline = $processor;
+
+        return $this;
     }
 
     /**
-     * @param null|callable[] $processors
+     * Chainable method that allows to modify the processor pipeline.
+     *
+     * @param callable $with callable with the current processor pipeline passed in
+     */
+    public function withProcessor(callable $with): Generator
+    {
+        $with($this->getProcessorPipeline());
+
+        return $this;
+    }
+
+    /**
+     * @return array<ProcessorInterface|callable>
+     *
+     * @deprecated
+     */
+    public function getProcessors(): array
+    {
+        return $this->getProcessorPipeline()->pipes();
+    }
+
+    /**
+     * @param array<ProcessorInterface|callable>|null $processors
+     *
+     * @deprecated
      */
     public function setProcessors(?array $processors): Generator
     {
-        $this->processors = $processors;
+        $this->processorPipeline = null !== $processors ? new Pipeline($processors) : null;
 
         return $this;
     }
 
-    public function addProcessor(callable $processor): Generator
+    /**
+     * @param callable|ProcessorInterface $processor
+     * @param class-string|null           $before
+     *
+     * @deprecated
+     */
+    public function addProcessor($processor, ?string $before = null): Generator
     {
-        $processors = $this->getProcessors();
-        $processors[] = $processor;
-        $this->setProcessors($processors);
-
-        return $this;
-    }
-
-    public function removeProcessor(callable $processor, bool $silent = false): Generator
-    {
-        $processors = $this->getProcessors();
-        if (false === ($key = array_search($processor, $processors, true))) {
-            if ($silent) {
-                return $this;
-            }
-            throw new \InvalidArgumentException('Processor not found');
+        $processors = $this->processorPipeline ?: $this->getProcessorPipeline();
+        if (!$before) {
+            $processors->add($processor);
+        } else {
+            $processors->insert($processor, $before);
         }
-        unset($processors[$key]);
-        $this->setProcessors($processors);
+
+        $this->processorPipeline = $processors;
+
+        return $this;
+    }
+
+    /**
+     * @param callable|ProcessorInterface $processor
+     *
+     * @deprecated
+     */
+    public function removeProcessor($processor, bool $silent = false): Generator
+    {
+        $processors = $this->processorPipeline ?: $this->getProcessorPipeline();
+        $processors->remove($processor);
+        $this->processorPipeline = $processors;
 
         return $this;
     }
@@ -234,13 +379,15 @@ class Generator
     /**
      * Update/replace an existing processor with a new one.
      *
-     * @param callable      $processor The new processor
-     * @param null|callable $matcher   Optional matcher callable to identify the processor to replace.
-     *                                 If none given, matching is based on the processors class.
+     * @param ProcessorInterface|callable $processor the new processor
+     * @param null|callable               $matcher   Optional matcher callable to identify the processor to replace.
+     *                                               If none given, matching is based on the processors class.
+     *
+     * @deprecated
      */
-    public function updateProcessor(callable $processor, ?callable $matcher = null): Generator
+    public function updateProcessor($processor, ?callable $matcher = null): Generator
     {
-        $matcher = $matcher ?: function ($other) use ($processor) {
+        $matcher = $matcher ?: function ($other) use ($processor): bool {
             $otherClass = get_class($other);
 
             return $processor instanceof $otherClass;
@@ -259,19 +406,19 @@ class Generator
         return $this->logger ?: new DefaultLogger();
     }
 
-    public function getVersion(): string
+    public function getVersion(): ?string
     {
         return $this->version;
     }
 
-    public function setVersion(string $version): Generator
+    public function setVersion(?string $version): Generator
     {
         $this->version = $version;
 
         return $this;
     }
 
-    public static function scan(iterable $sources, array $options = []): ?OpenApi
+    public static function scan(iterable $sources, array $options = []): ?OA\OpenApi
     {
         // merge with defaults
         $config = $options + [
@@ -279,18 +426,24 @@ class Generator
                 'namespaces' => self::DEFAULT_NAMESPACES,
                 'analyser' => null,
                 'analysis' => null,
+                'processor' => null,
                 'processors' => null,
+                'config' => [],
                 'logger' => null,
                 'validate' => true,
-                'version' => OpenApi::DEFAULT_VERSION,
+                'version' => null,
             ];
+
+        $processorPipeline = $config['processor'] ??
+            ($config['processors'] ? new Pipeline($config['processors']) : null);
 
         return (new Generator($config['logger']))
             ->setVersion($config['version'])
             ->setAliases($config['aliases'])
             ->setNamespaces($config['namespaces'])
             ->setAnalyser($config['analyser'])
-            ->setProcessors($config['processors'])
+            ->setProcessorPipeline($processorPipeline)
+            ->setConfig($config['config'])
             ->generate($sources, $config['analysis'], $config['validate']);
     }
 
@@ -329,23 +482,28 @@ class Generator
      * @param null|Analysis $analysis custom analysis instance
      * @param bool          $validate flag to enable/disable validation of the returned spec
      */
-    public function generate(iterable $sources, ?Analysis $analysis = null, bool $validate = true): ?OpenApi
+    public function generate(iterable $sources, ?Analysis $analysis = null, bool $validate = true): ?OA\OpenApi
     {
         $rootContext = new Context([
             'version' => $this->getVersion(),
             'logger' => $this->getLogger(),
         ]);
+
         $analysis = $analysis ?: new Analysis([], $rootContext);
+        $analysis->context = $analysis->context ?: $rootContext;
 
         $this->configStack->push($this);
         try {
             $this->scanSources($sources, $analysis, $rootContext);
 
-            // post processing
-            $analysis->process($this->getProcessors());
+            // post-processing
+            $this->getProcessorPipeline()->process($analysis);
 
             if ($analysis->openapi) {
-                $analysis->openapi->openapi = $this->version;
+                // overwrite default/annotated version
+                $analysis->openapi->openapi = $this->getVersion() ?: $analysis->openapi->openapi;
+                // update context to provide the same to validation/serialisation code
+                $rootContext->version = $analysis->openapi->openapi;
             }
 
             // validation
@@ -375,6 +533,7 @@ class Generator
                 if (is_dir($resolvedSource)) {
                     $this->scanSources(Util::finder($resolvedSource), $analysis, $rootContext);
                 } else {
+                    $rootContext->logger->debug(sprintf('Analysing source: %s', $resolvedSource));
                     $analysis->addAnalysis($analyser->fromFile($resolvedSource, $rootContext));
                 }
             }

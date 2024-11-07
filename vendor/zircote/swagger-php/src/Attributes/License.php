@@ -7,13 +7,14 @@
 namespace OpenApi\Attributes;
 
 use OpenApi\Generator;
+use OpenApi\Annotations as OA;
 
 #[\Attribute(\Attribute::TARGET_CLASS)]
-class License extends \OpenApi\Annotations\License
+class License extends OA\License
 {
     /**
-     * @param array<string,string>|null $x
-     * @param Attachable[]|null         $attachables
+     * @param array<string,mixed>|null $x
+     * @param Attachable[]|null        $attachables
      */
     public function __construct(
         ?string $name = null,

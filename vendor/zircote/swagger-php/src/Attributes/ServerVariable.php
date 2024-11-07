@@ -7,19 +7,21 @@
 namespace OpenApi\Attributes;
 
 use OpenApi\Generator;
+use OpenApi\Annotations as OA;
 
 #[\Attribute(\Attribute::TARGET_CLASS)]
-class ServerVariable extends \OpenApi\Annotations\ServerVariable
+class ServerVariable extends OA\ServerVariable
 {
     /**
-     * @param array<string,string>|null $x
-     * @param Attachable[]|null         $attachables
+     * @param array<string|int|float|bool|\UnitEnum|null>|class-string|null $enum
+     * @param array<string,mixed>|null                                      $x
+     * @param Attachable[]|null                                             $attachables
      */
     public function __construct(
         ?string $serverVariable = null,
         ?string $description = null,
         ?string $default = null,
-        ?array $enum = null,
+        array|string|null $enum = null,
         ?array $variables = null,
         // annotation
         ?array $x = null,

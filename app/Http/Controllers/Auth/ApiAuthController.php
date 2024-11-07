@@ -411,7 +411,7 @@ class ApiAuthController extends Controller
             $user->lang = $request->get('lang');
         }
 
-        if(!empty($request->get('compagnie_id')) && int($request->get('compagnie_id')) > 0){
+        if(!empty($request->get('compagnie_id')) && (int)$request->get('compagnie_id') > 0){
             $user->compagnie_id = $request->get('compagnie_id');
         }
 
